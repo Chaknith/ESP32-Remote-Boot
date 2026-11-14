@@ -179,7 +179,13 @@ describe("access and device authentication", () => {
     const { siteEnv } = harness();
     const response = await siteWorker.fetch(new Request(page), siteEnv, {});
     assert.equal(response.status, 200);
-    assert.match(await response.text(), /Sign in to begin/);
+    const landingPage = await response.text();
+    assert.match(landingPage, /Sign in to begin/);
+    assert.match(landingPage, /href="\/favicon\.svg"/);
+    const favicon = await siteWorker.fetch(new Request(`${page}/favicon.svg`), siteEnv, {});
+    assert.equal(favicon.status, 200);
+    assert.match(favicon.headers.get("content-type"), /image\/svg\+xml/);
+    assert.match(await favicon.text(), /<svg/);
     assert.equal((await siteWorker.fetch(new Request(`${page}/app/session`), siteEnv, {})).status, 403);
     assert.equal((await siteWorker.fetch(new Request(`${page}/app/app.js`), siteEnv, {})).status, 403);
     assert.equal((await siteWorker.fetch(new Request(`${page}/api/state`), siteEnv, {})).status, 404);
@@ -227,6 +233,7 @@ describe("access and device authentication", () => {
     assert.equal(response.status, 200);
     const pageHtml = await response.text();
     assert.match(pageHtml, /Press button/);
+    assert.match(pageHtml, /href="\/favicon\.svg"/);
     assert.doesNotMatch(pageHtml, /class="hero"/);
     assert.match(
       response.headers.get("content-security-policy"),

@@ -1,5 +1,5 @@
 import { commandStub, json, noCache, ONLINE_WINDOW_MS } from "./shared.js";
-import { html, landingHtml, landingJs, css, forceCss, landingCss, clientJs } from "./web.js";
+import { html, landingHtml, landingJs, css, forceCss, landingCss, clientJs, faviconSvg } from "./web.js";
 
 const securityHeaders = {
   "cache-control": "no-store",
@@ -20,6 +20,8 @@ export default {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/")
       return staticResponse(landingHtml, "text/html; charset=utf-8");
+    if (request.method === "GET" && url.pathname === "/favicon.svg")
+      return staticResponse(faviconSvg, "image/svg+xml; charset=utf-8");
     if (request.method === "GET" && url.pathname === "/style.css")
       return staticResponse(css + forceCss + landingCss, "text/css; charset=utf-8");
     if (request.method === "GET" && url.pathname === "/landing.js")

@@ -1,3 +1,68 @@
+export const faviconSvg = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 64 64"
+   version="1.1"
+   id="svg1"
+   sodipodi:docname="on off.svg"
+   inkscape:version="1.4.4 (dcaf3e7, 2026-05-05)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs1" />
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     showgrid="true"
+     inkscape:zoom="17.109375"
+     inkscape:cx="32"
+     inkscape:cy="31.941553"
+     inkscape:window-width="2560"
+     inkscape:window-height="1334"
+     inkscape:window-x="-11"
+     inkscape:window-y="-11"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg1">
+    <inkscape:grid
+       id="grid3"
+       units="px"
+       originx="0"
+       originy="0"
+       spacingx="1"
+       spacingy="1"
+       empcolor="#0099e5"
+       empopacity="0.30196078"
+       color="#0099e5"
+       opacity="0.14901961"
+       empspacing="5"
+       enabled="true"
+       visible="true" />
+  </sodipodi:namedview>
+  <rect
+     style="fill:#a7f16b;fill-opacity:1;stroke:#000000;stroke-width:0;stroke-linejoin:bevel"
+     id="rect2"
+     width="64"
+     height="64"
+     x="0"
+     y="0"
+     rx="17.446575"
+     inkscape:label="background" />
+  <path
+     d="M 32,8.103792 V 28 M 20.754317,15.024212 a 20.761262,20.761262 0 1 0 22.491366,0"
+     fill="none"
+     stroke="#10231a"
+     stroke-width="4.32526"
+     stroke-linecap="round"
+     id="path1" />
+</svg>`;
+
 export const landingHtml = `<!doctype html>
 <html lang="en">
 <head>
@@ -6,6 +71,7 @@ export const landingHtml = `<!doctype html>
   <meta name="theme-color" content="#0a1715">
   <title>Remote Boot | Sign in</title>
   <meta name="description" content="Private remote power control for your PC.">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
   <script src="/landing.js" defer></script>
 </head>
@@ -43,6 +109,7 @@ export const html = `<!doctype html>
   <meta name="theme-color" content="#0a1715">
   <title>Remote Boot | Control</title>
   <meta name="description" content="Private remote power control for your PC.">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/style.css">
   <script src="/app/app.js" defer></script>
 </head>
