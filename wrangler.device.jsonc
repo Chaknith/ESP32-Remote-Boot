@@ -1,0 +1,9 @@
+{
+  "name": "remote-boot-device",
+  "main": "src/device.js",
+  "compatibility_date": "2026-11-14",
+  "durable_objects": {
+    "bindings": [{ "name": "COMMANDS", "class_name": "CommandState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CommandState"] }]
+}

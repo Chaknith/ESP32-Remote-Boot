@@ -1,0 +1,14 @@
+{
+  "name": "esp32-remote-boot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev -c wrangler.site.jsonc -c wrangler.device.jsonc",
+    "test": "node --test",
+    "deploy:device": "wrangler deploy -c wrangler.device.jsonc",
+    "deploy:site": "wrangler deploy -c wrangler.site.jsonc"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

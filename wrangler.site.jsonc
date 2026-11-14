@@ -1,0 +1,11 @@
+{
+  "name": "remote-boot-site",
+  "main": "src/site.js",
+  "compatibility_date": "2026-11-14",
+  "durable_objects": {
+    "bindings": [{ "name": "COMMANDS", "class_name": "CommandState", "script_name": "remote-boot-device" }]
+  },
+  "access": {
+    "dev": { "aud": "local-development", "identity": { "email": "owner@example.com" } }
+  }
+}
