@@ -1,15 +1,13 @@
 # ESP32 Remote Boot
 
-Private, internet-accessible power-button control for one PC. A Cloudflare Access email code protects the website. An ESP32 opens an outbound, authenticated WebSocket to a separate device Worker and closes a relay for a short power-button pulse or a fixed five-second force-shutdown hold.
+Private, internet-accessible power-button control for one PC. A Cloudflare Access email code protects the control page and API; the landing page is public. An ESP32 opens an outbound, authenticated WebSocket to a separate device Worker and closes a relay for a short power-button pulse or a fixed five-second force-shutdown hold.
 
 ## How it works
 
 ```text
-Browser → Cloudflare Access → remote-boot-site Worker → Durable Object
-                                                       ↑
-ESP32 ↔ WSS + device token ↔ remote-boot-device Worker ┘
-                                              │
-                                              └→ relay across PC power-button pins
+Browser -> public landing page (/) -> site Worker
+Browser -> Access-protected /app/* -> site Worker -> Durable Object
+ESP32 -> authenticated WSS -> device Worker ------> Durable Object -> relay
 ```
 
 The two Workers share one strongly consistent Durable Object. The ESP32 starts the WebSocket connection from behind the home router. The device Worker pushes a command over that connection and receives an acknowledgement over the same connection. Commands expire after 90 seconds, and the service enforces ten seconds between requests. If the connection drops before an acknowledgement, the pending command is sent again on reconnect until it expires. The ESP32 stores the last command ID in flash *before* actuating the relay, so a repeated command does not repeat the relay action. The dashboard reports whether the ESP32 is connected and whether a command was acknowledged; it cannot detect the PC's actual power state. A short pulse may turn on the PC or initiate shutdown depending on its current state and operating-system settings. A five-second hold can force an unresponsive PC off and may lose unsaved work. The website asks for confirmation before either command.
@@ -22,11 +20,11 @@ You need a Cloudflare account, Node.js, and npm. A purchased domain is optional;
 2. Run `npm run deploy:device` first. Copy the resulting `https://remote-boot-device.<your-subdomain>.workers.dev` URL for the firmware.
 3. Generate a random device token of at least 32 bytes. In PowerShell, run `$bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes); ($bytes | ForEach-Object { $_.ToString('x2') }) -join ''`. Save the result privately.
 4. Run `npx wrangler secret put DEVICE_TOKEN -c wrangler.device.jsonc` and paste the token at the hidden prompt.
-5. Run `npm run deploy:site`, then `npx wrangler secret put ALLOWED_EMAIL -c wrangler.site.jsonc` and enter the one email address that may use the website. The site returns HTTP 403 until Access is configured.
-6. In Cloudflare Zero Trust, enable **One-time PIN** as a login method. For the `remote-boot-site` Worker, open **Access → Protect this Worker behind Access**, choose **All traffic**, and allow only that same email address. Set the session duration you prefer. Do **not** put `remote-boot-device` behind Access; its device token protects its WebSocket endpoint.
-7. Open the `remote-boot-site` URL. Cloudflare should ask for your email code. After signing in, the dashboard should show **ESP32 offline** until you flash the firmware.
+5. Run `npm run deploy:site`, then `npx wrangler secret put ALLOWED_EMAIL -c wrangler.site.jsonc` and enter the one email address that may use the website. The public landing page is available immediately; private routes return HTTP 403 until Access is configured.
+6. In Cloudflare Zero Trust, enable **One-time PIN** as a login method. In **Access > Applications**, create a **Self-hosted** application for `remote-boot-site.<your-subdomain>.workers.dev/app/*` and allow only the same email address. Set the session duration you prefer. If you previously enabled **Protect this Worker behind Access > All traffic**, disable that worker-level rule; otherwise the public landing page remains hidden. Also check for account-level **Protect all Workers** rules. Do **not** put `remote-boot-device` behind Access; its token protects the WebSocket.
+7. Open the `remote-boot-site` URL. The public landing page shows **Sign in to begin**. After the email code, the protected `/app/control` page shows the ESP32 status. On later visits, a valid Access session redirects from the landing page to the controls. **Sign out** ends the Access session and returns to the landing page.
 
-The site Worker also checks Cloudflare's authenticated Access identity and the configured email on every request. If Access is missing, it returns 403. The device Worker has no browser login and accepts only the matching device token. Keep the device token and Wi-Fi credentials out of Git.
+The site Worker checks Cloudflare's authenticated Access identity and the configured email on every `/app/*` request. If Access is missing, private routes return 403. The public landing page is at `/`; the sign-in check and all control API routes are under `/app/*`. Cloudflare Access logout ends the user's session across Access applications and may take up to about 30 seconds to invalidate previously issued tokens. The device Worker has no browser login and accepts only the matching device token. Keep the device token and Wi-Fi credentials out of Git.
 
 This repository can be public: the real token, Wi-Fi settings, and owner email belong only in local ignored files or Cloudflare secrets. Before pushing changes, check `git status` and `git diff --cached` for accidental credentials. Do not force-add local secret files. If a real secret is ever pushed, rotate it; deleting the file in a later commit does not remove it from Git history.
 
@@ -60,7 +58,7 @@ This is a protocol change: the old firmware's `/poll` and `/ack` endpoints are r
 
 ## Development and checks
 
-Run `npm test` for Worker logic tests. Run `npm run dev` for local Worker development. The single local Worker serves the dashboard at `http://localhost:8787` and the device WebSocket at `/device/connect`, sharing one local Durable Object. Put `ALLOWED_EMAIL=owner@example.com` and a separate test `DEVICE_TOKEN` in the ignored `.dev.vars` file. The local configuration simulates the owner identity; it does **not** test the production Access policy. Never commit `.dev.vars`.
+Run `npm test` for Worker logic tests. Run `npm run dev` for local Worker development. The single local Worker serves a landing page at `http://localhost:8787`, a control page at `/app/control`, and the device WebSocket at `/device/connect`, sharing one local Durable Object. Put `ALLOWED_EMAIL=owner@example.com` and a separate test `DEVICE_TOKEN` in the ignored `.dev.vars` file. The local configuration simulates sign-in and sign-out with a development-only cookie and the owner identity; it does **not** test the production Access policy. Never commit `.dev.vars`.
 
 For a real ESP32 on the same Wi-Fi as the development PC, run `npm run dev -- --ip YOUR_PC_LAN_IP` (for example, `192.168.0.41`). In the ignored `firmware/main/secrets.h`, set `DEVICE_URL` to `http://YOUR_PC_LAN_IP:8787/device` without a trailing slash and set `ALLOW_INSECURE_LOCAL_WS` to `1`. Put the same separate test `DEVICE_TOKEN` in `secrets.h` and `.dev.vars`, then rebuild and flash the ESP32. Open the dashboard at `http://YOUR_PC_LAN_IP:8787/`. The PC firewall must allow TCP port 8787 from the ESP32. This LAN test mode sends the token and commands without encryption; use it only on a trusted network, then restore HTTPS and set the flag to `0` before deployment. Disconnect the relay contacts from the PC while testing.
 

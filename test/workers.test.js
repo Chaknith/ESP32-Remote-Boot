@@ -4,8 +4,9 @@ import { webcrypto } from "node:crypto";
 import { runInNewContext } from "node:vm";
 import deviceWorker, { CommandState } from "../src/device.js";
 import siteWorker from "../src/site.js";
+import localWorker from "../src/local.js";
 import { COMMAND_COOLDOWN_MS } from "../src/shared.js";
-import { clientJs } from "../src/web.js";
+import { clientJs, landingJs } from "../src/web.js";
 
 globalThis.crypto ||= webcrypto;
 
@@ -174,16 +175,30 @@ describe("command lifecycle", () => {
 });
 
 describe("access and device authentication", () => {
+  it("serves a public landing page without exposing the controls", async () => {
+    const { siteEnv } = harness();
+    const response = await siteWorker.fetch(new Request(page), siteEnv, {});
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /Sign in to begin/);
+    assert.equal((await siteWorker.fetch(new Request(`${page}/app/session`), siteEnv, {})).status, 403);
+    assert.equal((await siteWorker.fetch(new Request(`${page}/app/app.js`), siteEnv, {})).status, 403);
+    assert.equal((await siteWorker.fetch(new Request(`${page}/api/state`), siteEnv, {})).status, 404);
+    const signIn = await siteWorker.fetch(new Request(`${page}/sign-in`), siteEnv, {});
+    assert.equal(signIn.headers.get("location"), "/app/control");
+    const signOut = await siteWorker.fetch(new Request(`${page}/sign-out`), siteEnv, {});
+    assert.match(signOut.headers.get("location"), /^\/cdn-cgi\/access\/logout\?returnTo=/);
+  });
+
   it("fails closed without Cloudflare Access or the configured email", async () => {
     const { siteEnv } = harness();
     assert.equal(
-      (await siteWorker.fetch(new Request(page), siteEnv, {})).status,
+      (await siteWorker.fetch(new Request(`${page}/app/control`), siteEnv, {})).status,
       403,
     );
     assert.equal(
       (
         await siteWorker.fetch(
-          new Request(page),
+          new Request(`${page}/app/control`),
           { ...siteEnv, ALLOWED_EMAIL: "" },
           identity,
         )
@@ -192,7 +207,7 @@ describe("access and device authentication", () => {
     );
     assert.equal(
       (
-        await siteWorker.fetch(new Request(page), siteEnv, {
+        await siteWorker.fetch(new Request(`${page}/app/control`), siteEnv, {
           access: {
             getIdentity: async () => ({ email: "someone@example.com" }),
           },
@@ -205,21 +220,43 @@ describe("access and device authentication", () => {
   it("serves the dashboard to the allowed Access identity", async () => {
     const { siteEnv } = harness();
     const response = await siteWorker.fetch(
-      new Request(page),
+      new Request(`${page}/app/control`),
       siteEnv,
       identity,
     );
     assert.equal(response.status, 200);
-    assert.match(await response.text(), /Send power pulse/);
+    const pageHtml = await response.text();
+    assert.match(pageHtml, /Send power pulse/);
+    assert.doesNotMatch(pageHtml, /class="hero"/);
     assert.match(
       response.headers.get("content-security-policy"),
       /script-src 'self'/,
     );
   });
 
+  it("simulates sign in and sign out in the local Worker", async () => {
+    const h = harness();
+    const base = "http://localhost:8787";
+    const localEnv = { ...h.siteEnv, DEVICE_TOKEN: h.deviceEnv.DEVICE_TOKEN };
+    assert.equal((await localWorker.fetch(new Request(`${base}/app/session`), localEnv, identity)).status, 403);
+    const signIn = await localWorker.fetch(new Request(`${base}/sign-in`), localEnv, identity);
+    assert.equal(signIn.status, 302);
+    const cookie = signIn.headers.get("set-cookie").split(";")[0];
+    const session = await localWorker.fetch(new Request(`${base}/app/session`, {
+      headers: { cookie },
+    }), localEnv, identity);
+    assert.equal((await session.json()).signedIn, true);
+    const signOut = await localWorker.fetch(new Request(`${base}/sign-out`, {
+      headers: { cookie },
+    }), localEnv, identity);
+    assert.equal(signOut.headers.get("location"), "/");
+    assert.match(signOut.headers.get("set-cookie"), /Max-Age=0/);
+    assert.equal((await localWorker.fetch(new Request(`${base}/app/session`), localEnv, identity)).status, 403);
+  });
+
   it("rejects cross-origin boot requests and offline commands", async () => {
     const { siteEnv } = harness();
-    const crossOrigin = new Request(`${page}/api/boot`, {
+    const crossOrigin = new Request(`${page}/app/api/boot`, {
       method: "POST",
       headers: { origin: "https://evil.example" },
     });
@@ -227,7 +264,7 @@ describe("access and device authentication", () => {
       (await siteWorker.fetch(crossOrigin, siteEnv, identity)).status,
       403,
     );
-    const crossOriginHold = new Request(`${page}/api/hold`, {
+    const crossOriginHold = new Request(`${page}/app/api/hold`, {
       method: "POST",
       headers: { origin: "https://evil.example" },
     });
@@ -235,7 +272,7 @@ describe("access and device authentication", () => {
       (await siteWorker.fetch(crossOriginHold, siteEnv, identity)).status,
       403,
     );
-    const sameOrigin = new Request(`${page}/api/boot`, {
+    const sameOrigin = new Request(`${page}/app/api/boot`, {
       method: "POST",
       headers: { origin: page },
     });
@@ -243,7 +280,7 @@ describe("access and device authentication", () => {
       (await siteWorker.fetch(sameOrigin, siteEnv, identity)).status,
       503,
     );
-    const sameOriginHold = new Request(`${page}/api/hold`, {
+    const sameOriginHold = new Request(`${page}/app/api/hold`, {
       method: "POST",
       headers: { origin: page },
     });
@@ -286,7 +323,7 @@ describe("access and device authentication", () => {
     const { siteEnv } = h;
     connectDevice(h);
     const response = await siteWorker.fetch(
-      new Request(`${page}/api/boot`, {
+      new Request(`${page}/app/api/boot`, {
         method: "POST",
         headers: { origin: page },
       }),
@@ -301,9 +338,9 @@ describe("access and device authentication", () => {
     const h = harness();
     connectDevice(h);
     h.sockets.length = 0;
-    const state = await siteWorker.fetch(new Request(`${page}/api/state`), h.siteEnv, identity);
+    const state = await siteWorker.fetch(new Request(`${page}/app/api/state`), h.siteEnv, identity);
     assert.equal((await state.json()).online, false);
-    const response = await siteWorker.fetch(new Request(`${page}/api/boot`, {
+    const response = await siteWorker.fetch(new Request(`${page}/app/api/boot`, {
       method: "POST",
       headers: { origin: page },
     }), h.siteEnv, identity);
@@ -315,7 +352,7 @@ describe("access and device authentication", () => {
     const { siteEnv } = h;
     const socket = connectDevice(h);
     const response = await siteWorker.fetch(
-      new Request(`${page}/api/hold`, {
+      new Request(`${page}/app/api/hold`, {
         method: "POST",
         headers: { origin: page },
       }),
@@ -327,7 +364,7 @@ describe("access and device authentication", () => {
     assert.equal(command.kind, "hold");
     assert.deepEqual(socket.messages, [`HOLD ${command.id} ${command.expiresAt}`]);
     const state = await siteWorker.fetch(
-      new Request(`${page}/api/state`),
+      new Request(`${page}/app/api/state`),
       siteEnv,
       identity,
     );
@@ -336,6 +373,25 @@ describe("access and device authentication", () => {
 });
 
 describe("website confirmation", () => {
+  it("redirects returning signed-in visitors from the landing page", async () => {
+    const visits = [];
+    const context = {
+      window: { location: { replace: (path) => visits.push(path) } },
+      fetch: async (_path, options) => {
+        assert.equal(options.headers["X-Requested-With"], "XMLHttpRequest");
+        return { ok: true, headers: { get: () => "application/json; charset=utf-8" } };
+      },
+    };
+    runInNewContext(landingJs, context);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(visits, ["/app/control"]);
+    visits.length = 0;
+    context.fetch = async () => ({ ok: false, headers: { get: () => "text/html" } });
+    runInNewContext(landingJs, context);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(visits, []);
+  });
+
   it("updates the cooldown number every second", async () => {
     const elements = new Map(["boot", "hold", "feedback", "status-pill", "status-text", "last-seen"].map((id) => [
       id, { disabled: false, classList: { toggle() {} }, addEventListener() {} },
@@ -391,7 +447,7 @@ describe("website confirmation", () => {
         return {
           ok: true,
           json: async () =>
-            path === "/api/state"
+            path === "/app/api/state"
               ? { online: true, pending: false }
               : { command: { id: "test" } },
         };
@@ -404,17 +460,17 @@ describe("website confirmation", () => {
     await elements.get("boot").click();
     await elements.get("hold").click();
     assert.equal(
-      requests.filter((request) => request.path === "/api/boot").length,
+      requests.filter((request) => request.path === "/app/api/boot").length,
       0,
     );
     assert.equal(
-      requests.filter((request) => request.path === "/api/hold").length,
+      requests.filter((request) => request.path === "/app/api/hold").length,
       0,
     );
     confirmed = true;
     await elements.get("hold").click();
     assert.equal(
-      requests.filter((request) => request.path === "/api/hold").length,
+      requests.filter((request) => request.path === "/app/api/hold").length,
       1,
     );
   });
