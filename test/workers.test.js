@@ -426,6 +426,9 @@ describe("website confirmation", () => {
         "status-pill",
         "status-text",
         "last-seen",
+        "confirm-title",
+        "confirm-message",
+        "confirm-accept",
       ].map((id) => [
         id,
         {
@@ -437,11 +440,28 @@ describe("website confirmation", () => {
         },
       ]),
     );
+    const dialog = {
+      open: false,
+      returnValue: "",
+      addEventListener(_event, handler) {
+        this.onClose = handler;
+      },
+      removeEventListener() {
+        this.onClose = null;
+      },
+      showModal() {
+        this.open = true;
+      },
+      close(value) {
+        this.open = false;
+        this.returnValue = value;
+        this.onClose();
+      },
+    };
+    elements.set("confirm-dialog", dialog);
     const requests = [];
-    let confirmed = false;
     const context = {
       document: { getElementById: (id) => elements.get(id) },
-      window: { confirm: () => confirmed },
       fetch: async (path, options) => {
         requests.push({ path, options });
         return {
@@ -457,8 +477,15 @@ describe("website confirmation", () => {
     };
     runInNewContext(clientJs, context);
     await new Promise((resolve) => setImmediate(resolve));
-    await elements.get("boot").click();
-    await elements.get("hold").click();
+    let action = elements.get("boot").click();
+    assert.equal(dialog.open, true);
+    assert.equal(elements.get("confirm-accept").textContent, "Press button");
+    dialog.close("cancel");
+    await action;
+    action = elements.get("hold").click();
+    assert.equal(elements.get("confirm-accept").textContent, "Force shutdown");
+    dialog.close("cancel");
+    await action;
     assert.equal(
       requests.filter((request) => request.path === "/app/api/boot").length,
       0,
@@ -467,8 +494,9 @@ describe("website confirmation", () => {
       requests.filter((request) => request.path === "/app/api/hold").length,
       0,
     );
-    confirmed = true;
-    await elements.get("hold").click();
+    action = elements.get("hold").click();
+    dialog.close("confirm");
+    await action;
     assert.equal(
       requests.filter((request) => request.path === "/app/api/hold").length,
       1,
