@@ -52,7 +52,7 @@ This is a protocol change: the old firmware's `/poll` and `/ack` endpoints are r
 
 ### Website controls
 
-- **Send power pulse** closes the relay for `RELAY_PULSE_MS` (500 ms in the example).
+- **Press button** closes the relay for `RELAY_PULSE_MS` (500 ms in the example).
 - **Force shutdown (hold 5 seconds)** closes the same relay for a fixed 5,000 ms. Use it only when the PC is unresponsive; it can lose unsaved work. The relay module must be rated to remain energized for at least five seconds.
 - Both controls require confirmation in the browser and share the same ten-second cooldown, shown as a countdown on the dashboard. The server also requires the signed-in owner, the same origin, and a recently online ESP32. The PC's actual power state is not measured, so check it before using either control.
 

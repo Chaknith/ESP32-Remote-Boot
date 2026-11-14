@@ -226,7 +226,7 @@ describe("access and device authentication", () => {
     );
     assert.equal(response.status, 200);
     const pageHtml = await response.text();
-    assert.match(pageHtml, /Send power pulse/);
+    assert.match(pageHtml, /Press button/);
     assert.doesNotMatch(pageHtml, /class="hero"/);
     assert.match(
       response.headers.get("content-security-policy"),
