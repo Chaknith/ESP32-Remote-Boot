@@ -21,6 +21,7 @@
 #define WIFI_CONNECTED_BIT BIT0
 #define POLL_INTERVAL_MS 10000
 #define RESPONSE_SIZE 96
+#define BOOT_TASK_STACK_BYTES 16384
 
 static const char *TAG = "remote_boot";
 static EventGroupHandle_t wifi_events;
@@ -34,9 +35,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *event = data;
+        ESP_LOGW(TAG, "Wi-Fi disconnected (reason %d); retrying", event ? event->reason : -1);
         xEventGroupClearBits(wifi_events, WIFI_CONNECTED_BIT);
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ESP_LOGI(TAG, "Wi-Fi connected; IP address obtained");
         xEventGroupSetBits(wifi_events, WIFI_CONNECTED_BIT);
     }
 }
@@ -143,9 +147,10 @@ static void setup_relay(void) {
     gpio_set_level(RELAY_GPIO, !RELAY_ACTIVE_LEVEL);
 }
 
-void app_main(void) {
+static void boot_task(void *arg) {
     if (strncmp(DEVICE_URL, "https://", 8) != 0) {
         ESP_LOGE(TAG, "DEVICE_URL must use HTTPS");
+        vTaskDelete(NULL);
         return;
     }
     ESP_ERROR_CHECK(nvs_flash_init());
@@ -154,10 +159,16 @@ void app_main(void) {
     while (!(xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY) & WIFI_CONNECTED_BIT)) {}
     wait_for_clock();
 
+    bool poll_reported = false;
     while (true) {
         if (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) {
             response_buffer_t response;
             int status = request("/poll", HTTP_METHOD_GET, NULL, &response);
+            if (status == 200 && !poll_reported) {
+                ESP_LOGI(TAG, "Device poll succeeded; website should show ESP32 online");
+                ESP_LOGI(TAG, "Boot task minimum free stack: %u bytes", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+                poll_reported = true;
+            }
             if (status == 200 && strncmp(response.text, "BOOT ", 5) == 0) {
                 char *id = response.text + 5;
                 if (strlen(id) == 36) {
@@ -176,9 +187,16 @@ void app_main(void) {
                     if (ack_status != 200) ESP_LOGW(TAG, "Acknowledgement failed: HTTP %d", ack_status);
                 }
             } else if (status != 200) {
+                poll_reported = false;
                 ESP_LOGW(TAG, "Polling failed: HTTP %d", status);
             }
         }
         vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
+    }
+}
+
+void app_main(void) {
+    if (xTaskCreate(boot_task, "boot_control", BOOT_TASK_STACK_BYTES, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Could not create boot task");
     }
 }
