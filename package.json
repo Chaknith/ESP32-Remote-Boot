@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev -c wrangler.site.jsonc -c wrangler.device.jsonc",
+    "dev": "wrangler dev -c wrangler.local.jsonc",
     "test": "node --test",
     "deploy:device": "wrangler deploy -c wrangler.device.jsonc",
     "deploy:site": "wrangler deploy -c wrangler.site.jsonc"

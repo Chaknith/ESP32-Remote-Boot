@@ -38,7 +38,7 @@ export default {
       const state = await response.json();
       return json({
         online:
-          !!state.lastSeen && Date.now() - state.lastSeen < ONLINE_WINDOW_MS,
+          !!state.connected && !!state.lastSeen && Date.now() - state.lastSeen < ONLINE_WINDOW_MS,
         pending: !!state.pending,
         pendingKind: state.pending?.kind || null,
         readyAt: state.readyAt,
@@ -59,7 +59,7 @@ export default {
       );
       if (!stateResponse.ok) return json({ error: "State unavailable" }, 502);
       const state = await stateResponse.json();
-      if (!state.lastSeen || Date.now() - state.lastSeen >= ONLINE_WINDOW_MS) {
+      if (!state.connected || !state.lastSeen || Date.now() - state.lastSeen >= ONLINE_WINDOW_MS) {
         return json(
           { error: "ESP32 is offline. Command was not queued." },
           503,

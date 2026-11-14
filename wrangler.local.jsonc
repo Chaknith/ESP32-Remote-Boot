@@ -1,0 +1,12 @@
+{
+  "name": "remote-boot-local",
+  "main": "src/local.js",
+  "compatibility_date": "2026-11-14",
+  "durable_objects": {
+    "bindings": [{ "name": "COMMANDS", "class_name": "CommandState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CommandState"] }],
+  "access": {
+    "dev": { "aud": "local-development", "identity": { "email": "owner@example.com" } }
+  }
+}

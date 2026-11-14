@@ -22,16 +22,10 @@ export default {
       });
     }
     const path = new URL(request.url).pathname;
-    if (path === "/poll" && request.method === "GET") {
-      return commandStub(env).fetch("https://internal/poll");
-    }
-    if (path === "/ack" && request.method === "POST") {
-      const id = (await request.text()).trim();
-      if (!/^[a-f0-9-]{36}$/.test(id))
-        return json({ error: "Invalid command ID" }, 400);
-      return commandStub(env).fetch(
-        new Request("https://internal/ack", { method: "POST", body: id }),
-      );
+    if (path === "/connect" && request.method === "GET") {
+      if (request.headers.get("upgrade")?.toLowerCase() !== "websocket")
+        return new Response("WebSocket upgrade required", { status: 426 });
+      return commandStub(env).fetch(request);
     }
     return new Response("Not found", { status: 404 });
   },
@@ -42,10 +36,28 @@ export class CommandState {
     this.state = state;
   }
 
+  async sendPending(ws) {
+    const command = await this.state.storage.get("pending");
+    if (!command || command.expiresAt <= Date.now()) return;
+    const action = command.kind === "hold" ? "HOLD" : "BOOT";
+    ws.send(`${action} ${command.id} ${command.expiresAt}`);
+  }
+
   async fetch(request) {
     const path = new URL(request.url).pathname;
     const now = Date.now();
     const storage = this.state.storage;
+
+    if (path === "/connect" && request.method === "GET") {
+      if (request.headers.get("upgrade")?.toLowerCase() !== "websocket")
+        return new Response("WebSocket upgrade required", { status: 426 });
+      for (const old of this.state.getWebSockets()) old.close(1000, "Replaced");
+      const [client, server] = Object.values(new WebSocketPair());
+      this.state.acceptWebSocket(server);
+      await storage.put("lastSeen", now);
+      await this.sendPending(server);
+      return new Response(null, { status: 101, webSocket: client });
+    }
 
     if (path === "/enqueue" && request.method === "POST") {
       const kind = (await request.text()).trim();
@@ -68,34 +80,14 @@ export class CommandState {
       };
       await storage.put("pending", command);
       await storage.put("lastRequest", now);
+      for (const ws of this.state.getWebSockets()) {
+        try {
+          await this.sendPending(ws);
+        } catch {
+          ws.close(1011, "Delivery failed");
+        }
+      }
       return json({ command }, 202);
-    }
-
-    if (path === "/poll" && request.method === "GET") {
-      const lastSeen = (await storage.get("lastSeen")) || 0;
-      if (now - lastSeen >= 30_000) await storage.put("lastSeen", now);
-      const pending = await storage.get("pending");
-      if (!pending || pending.expiresAt <= now)
-        return new Response("NONE", {
-          headers: { "cache-control": "no-store" },
-        });
-      const action = pending.kind === "hold" ? "HOLD" : "BOOT";
-      return new Response(`${action} ${pending.id}`, {
-        headers: {
-          "cache-control": "no-store",
-          "content-type": "text/plain; charset=utf-8",
-        },
-      });
-    }
-
-    if (path === "/ack" && request.method === "POST") {
-      const id = (await request.text()).trim();
-      const pending = await storage.get("pending");
-      if (!pending || pending.id !== id)
-        return json({ error: "Unknown command" }, 404);
-      await storage.delete("pending");
-      await storage.put("lastBoot", now);
-      return json({ acknowledged: true });
     }
 
     if (path === "/state" && request.method === "GET") {
@@ -107,6 +99,7 @@ export class CommandState {
       ]);
       return json({
         pending: pending?.expiresAt > now ? pending : null,
+        connected: this.state.getWebSockets().length > 0,
         lastSeen: lastSeen || null,
         lastBoot: lastBoot || null,
         readyAt: lastRequest ? lastRequest + COMMAND_COOLDOWN_MS : null,
@@ -114,5 +107,21 @@ export class CommandState {
     }
 
     return new Response("Not found", { status: 404 });
+  }
+
+  async webSocketMessage(ws, message) {
+    if (typeof message !== "string" || !this.state.getWebSockets().includes(ws))
+      return;
+    const now = Date.now();
+    if (message === "PING") {
+      await this.state.storage.put("lastSeen", now);
+      return;
+    }
+    if (!/^ACK [a-f0-9-]{36}$/.test(message)) return;
+    const pending = await this.state.storage.get("pending");
+    if (!pending || pending.id !== message.slice(4)) return;
+    await this.state.storage.delete("pending");
+    await this.state.storage.put("lastBoot", now);
+    ws.send(`ACKED ${pending.id}`);
   }
 }

@@ -1,36 +1,42 @@
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include "driver/gpio.h"
 #include "esp_crt_bundle.h"
+#include "esp_err.h"
 #include "esp_event.h"
-#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_sntp.h"
+#include "esp_websocket_client.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "secrets.h"
 
 #define WIFI_CONNECTED_BIT BIT0
-#define POLL_INTERVAL_MS 10000
-#define RESPONSE_SIZE 96
 #define BOOT_TASK_STACK_BYTES 16384
 #define RELAY_HOLD_MS 5000
+#define HEARTBEAT_INTERVAL_MS 30000
+#define COMMAND_SIZE 96
 
 static const char *TAG = "remote_boot";
 static EventGroupHandle_t wifi_events;
+static QueueHandle_t command_queue;
 
 typedef struct {
-    char text[RESPONSE_SIZE];
-    size_t length;
-} response_buffer_t;
+    char id[37];
+    bool hold;
+    int64_t expires_at;
+} relay_command_t;
 
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
@@ -68,46 +74,57 @@ static void wait_for_clock(void) {
     sntp_setservername(0, "pool.ntp.org");
     sntp_init();
     while (time(NULL) < 1700000000) {
-        ESP_LOGI(TAG, "Waiting for clock sync before HTTPS");
+        ESP_LOGI(TAG, "Waiting for clock sync before WebSocket connection");
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
-static esp_err_t http_event_handler(esp_http_client_event_t *event) {
-    if (event->event_id != HTTP_EVENT_ON_DATA || !event->user_data) return ESP_OK;
-    response_buffer_t *buffer = event->user_data;
-    if (buffer->length + event->data_len >= RESPONSE_SIZE) return ESP_FAIL;
-    memcpy(buffer->text + buffer->length, event->data, event->data_len);
-    buffer->length += event->data_len;
-    buffer->text[buffer->length] = '\0';
-    return ESP_OK;
+static bool valid_id(const char *id) {
+    if (strlen(id) != 36) return false;
+    for (int i = 0; i < 36; ++i) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (id[i] != '-') return false;
+        } else if (!((id[i] >= '0' && id[i] <= '9') || (id[i] >= 'a' && id[i] <= 'f'))) return false;
+    }
+    return true;
 }
 
-static int request(const char *path, esp_http_client_method_t method, const char *body, response_buffer_t *response) {
-    char url[256];
-    int length = snprintf(url, sizeof(url), "%s%s", DEVICE_URL, path);
-    if (length < 0 || length >= sizeof(url)) return -1;
-    memset(response, 0, sizeof(*response));
-    esp_http_client_config_t config = {
-        .url = url,
-        .method = method,
-        .timeout_ms = 8000,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .event_handler = http_event_handler,
-        .user_data = response,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) return -1;
-    esp_http_client_set_header(client, "x-device-token", DEVICE_TOKEN);
-    if (body) {
-        esp_http_client_set_header(client, "content-type", "text/plain");
-        esp_http_client_set_post_field(client, body, strlen(body));
+static void websocket_event(void *arg, esp_event_base_t base, int32_t event_id, void *event_data) {
+    esp_websocket_event_data_t *event = event_data;
+    if (event_id == WEBSOCKET_EVENT_CONNECTED) {
+        ESP_LOGI(TAG, "Device WebSocket connected; website should show ESP32 online");
+    } else if (event_id == WEBSOCKET_EVENT_DISCONNECTED) {
+        ESP_LOGW(TAG, "Device WebSocket disconnected; reconnecting");
+    } else if (event_id == WEBSOCKET_EVENT_ERROR) {
+        if (event) {
+            ESP_LOGW(TAG, "Device WebSocket error: TLS=%s verify=0x%x handshake HTTP=%d",
+                     esp_err_to_name(event->error_handle.esp_tls_last_esp_err),
+                     event->error_handle.esp_tls_cert_verify_flags,
+                     event->error_handle.esp_ws_handshake_status_code);
+        } else {
+            ESP_LOGW(TAG, "Device WebSocket error");
+        }
+    } else if (event_id == WEBSOCKET_EVENT_DATA && event && event->data_ptr) {
+        if (event->op_code != 0x1 || !event->fin || event->payload_offset != 0 ||
+            event->data_len != event->payload_len || event->data_len < 0 || event->data_len >= COMMAND_SIZE) return;
+        char message[COMMAND_SIZE];
+        memcpy(message, event->data_ptr, event->data_len);
+        message[event->data_len] = '\0';
+        if (strncmp(message, "ACKED ", 6) == 0) {
+            ESP_LOGI(TAG, "Command acknowledged by device Worker");
+            return;
+        }
+        relay_command_t command = {0};
+        long long expiry = 0;
+        char extra;
+        char action[6];
+        if (sscanf(message, "%5s %36s %lld %c", action, command.id, &expiry, &extra) != 3) return;
+        if (strcmp(action, "BOOT") != 0 && strcmp(action, "HOLD") != 0) return;
+        if (!valid_id(command.id) || expiry <= 0) return;
+        command.hold = strcmp(action, "HOLD") == 0;
+        command.expires_at = expiry;
+        if (xQueueSend(command_queue, &command, 0) != pdTRUE) ESP_LOGW(TAG, "Command queue full");
     }
-    esp_err_t error = esp_http_client_perform(client);
-    int status = error == ESP_OK ? esp_http_client_get_status_code(client) : -1;
-    if (error != ESP_OK) ESP_LOGW(TAG, "HTTPS request failed: %s", esp_err_to_name(error));
-    esp_http_client_cleanup(client);
-    return status;
 }
 
 static bool already_processed(const char *id) {
@@ -148,9 +165,34 @@ static void setup_relay(void) {
     gpio_set_level(RELAY_GPIO, !RELAY_ACTIVE_LEVEL);
 }
 
+#if defined(ALLOW_INSECURE_LOCAL_WS) && ALLOW_INSECURE_LOCAL_WS
+static bool is_private_lan_url(const char *url) {
+    unsigned int a, b, c, d, port;
+    int length = 0;
+    if (sscanf(url, "http://%u.%u.%u.%u:%u%n", &a, &b, &c, &d, &port, &length) != 5 ||
+        length == 0 || (url[length] != '\0' && url[length] != '/') ||
+        a > 255 || b > 255 || c > 255 || d > 255 || port == 0 || port > 65535) return false;
+    return a == 10 || (a == 172 && b >= 16 && b <= 31) || (a == 192 && b == 168);
+}
+#endif
+
 static void boot_task(void *arg) {
-    if (strncmp(DEVICE_URL, "https://", 8) != 0) {
-        ESP_LOGE(TAG, "DEVICE_URL must use HTTPS");
+    bool secure = strncmp(DEVICE_URL, "https://", 8) == 0;
+#if !defined(ALLOW_INSECURE_LOCAL_WS) || !ALLOW_INSECURE_LOCAL_WS
+    if (!secure) {
+        ESP_LOGE(TAG, "DEVICE_URL must use HTTPS (or explicitly enable LAN test mode)");
+        vTaskDelete(NULL);
+        return;
+    }
+#else
+    if (!secure && !is_private_lan_url(DEVICE_URL)) {
+        ESP_LOGE(TAG, "Plain HTTP is allowed only for a private LAN IPv4 address and port");
+        vTaskDelete(NULL);
+        return;
+    }
+#endif
+    if (DEVICE_URL[strlen(DEVICE_URL) - 1] == '/') {
+        ESP_LOGE(TAG, "DEVICE_URL must not have a trailing slash");
         vTaskDelete(NULL);
         return;
     }
@@ -159,46 +201,64 @@ static void boot_task(void *arg) {
     connect_wifi();
     while (!(xEventGroupWaitBits(wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY) & WIFI_CONNECTED_BIT)) {}
     wait_for_clock();
-
-    bool poll_reported = false;
+    char ws_url[256];
+    int url_length = snprintf(ws_url, sizeof(ws_url), "%s://%s/connect",
+                              secure ? "wss" : "ws", DEVICE_URL + (secure ? 8 : 7));
+    if (url_length < 0 || (size_t)url_length >= sizeof(ws_url)) {
+        ESP_LOGE(TAG, "Device URL is too long");
+        vTaskDelete(NULL);
+        return;
+    }
+    esp_websocket_client_config_t config = {
+        .uri = ws_url,
+        .crt_bundle_attach = secure ? esp_crt_bundle_attach : NULL,
+        .reconnect_timeout_ms = 5000,
+        .enable_close_reconnect = true,
+        .ping_interval_sec = 20,
+    };
+    if (!secure) ESP_LOGW(TAG, "LAN test mode: WebSocket traffic is unencrypted");
+    ESP_LOGI(TAG, "Connecting to %s", ws_url);
+    esp_websocket_client_handle_t client = esp_websocket_client_init(&config);
+    if (!client) {
+        ESP_LOGE(TAG, "Could not initialize WebSocket client");
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_ERROR_CHECK(esp_websocket_client_append_header(client, "x-device-token", DEVICE_TOKEN));
+    ESP_ERROR_CHECK(esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event, NULL));
+    ESP_ERROR_CHECK(esp_websocket_client_start(client));
+    TickType_t last_heartbeat = 0;
     while (true) {
-        if (xEventGroupGetBits(wifi_events) & WIFI_CONNECTED_BIT) {
-            response_buffer_t response;
-            int status = request("/poll", HTTP_METHOD_GET, NULL, &response);
-            if (status == 200 && !poll_reported) {
-                ESP_LOGI(TAG, "Device poll succeeded; website should show ESP32 online");
-                ESP_LOGI(TAG, "Boot task minimum free stack: %u bytes", (unsigned)uxTaskGetStackHighWaterMark(NULL));
-                poll_reported = true;
-            }
-            bool hold = strncmp(response.text, "HOLD ", 5) == 0;
-            bool pulse = strncmp(response.text, "BOOT ", 5) == 0;
-            if (status == 200 && (pulse || hold)) {
-                char *id = response.text + 5;
-                if (strlen(id) == 36) {
-                    if (!already_processed(id)) {
-                        if (save_processed_id(id)) {
-                            activate_relay(hold);
-                            ESP_LOGI(TAG, "%s", hold ? "Five-second power-button hold sent" : "Power-button pulse sent");
-                        } else {
-                            ESP_LOGE(TAG, "Could not save command ID; pulse refused");
-                            vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
-                            continue;
-                        }
-                    }
-                    response_buffer_t ack_response;
-                    int ack_status = request("/ack", HTTP_METHOD_POST, id, &ack_response);
-                    if (ack_status != 200) ESP_LOGW(TAG, "Acknowledgement failed: HTTP %d", ack_status);
-                }
-            } else if (status != 200) {
-                poll_reported = false;
-                ESP_LOGW(TAG, "Polling failed: HTTP %d", status);
-            }
+        bool connected = esp_websocket_client_is_connected(client);
+        TickType_t now_ticks = xTaskGetTickCount();
+        if (connected && (last_heartbeat == 0 || now_ticks - last_heartbeat >= pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS))) {
+            esp_websocket_client_send_text(client, "PING", 4, pdMS_TO_TICKS(1000));
+            last_heartbeat = now_ticks;
         }
-        vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
+        relay_command_t command;
+        if (xQueueReceive(command_queue, &command, pdMS_TO_TICKS(1000)) != pdTRUE) continue;
+        if (!esp_websocket_client_is_connected(client) || (int64_t)time(NULL) * 1000 >= command.expires_at) continue;
+        if (!already_processed(command.id)) {
+            if (!save_processed_id(command.id)) {
+                ESP_LOGE(TAG, "Could not save command ID; relay activation refused");
+                continue;
+            }
+            activate_relay(command.hold);
+            ESP_LOGI(TAG, "%s", command.hold ? "Five-second power-button hold sent" : "Power-button pulse sent");
+        }
+        char ack[41];
+        snprintf(ack, sizeof(ack), "ACK %s", command.id);
+        if (esp_websocket_client_is_connected(client) && esp_websocket_client_send_text(client, ack, strlen(ack), pdMS_TO_TICKS(1000)) < 0)
+            ESP_LOGW(TAG, "Acknowledgement send failed; retry on reconnect");
     }
 }
 
 void app_main(void) {
+    command_queue = xQueueCreate(4, sizeof(relay_command_t));
+    if (!command_queue) {
+        ESP_LOGE(TAG, "Could not create command queue");
+        return;
+    }
     if (xTaskCreate(boot_task, "boot_control", BOOT_TASK_STACK_BYTES, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Could not create boot task");
     }

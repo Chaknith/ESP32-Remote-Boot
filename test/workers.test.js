@@ -10,7 +10,10 @@ globalThis.crypto ||= webcrypto;
 
 function harness() {
   const values = new Map();
+  const sockets = [];
   const state = new CommandState({
+    getWebSockets: () => sockets,
+    acceptWebSocket: (socket) => sockets.push(socket),
     storage: {
       get: async (key) => values.get(key),
       put: async (key, value) => values.set(key, value),
@@ -28,10 +31,22 @@ function harness() {
   };
   return {
     values,
+    sockets,
     state,
     siteEnv: { COMMANDS: binding, ALLOWED_EMAIL: "owner@example.com" },
     deviceEnv: { COMMANDS: binding, DEVICE_TOKEN: "test-device-secret" },
   };
+}
+
+function connectDevice(h) {
+  const socket = {
+    messages: [],
+    send(message) { this.messages.push(message); },
+    close() { h.sockets.splice(h.sockets.indexOf(this), 1); },
+  };
+  h.sockets.push(socket);
+  h.values.set("lastSeen", Date.now());
+  return socket;
 }
 
 const identity = {
@@ -40,8 +55,10 @@ const identity = {
 const page = "https://remote-boot-site.example.workers.dev";
 
 describe("command lifecycle", () => {
-  it("queues one command, delivers it to the device, then acknowledges it", async () => {
-    const { state, values } = harness();
+  it("pushes one command to the connected device, then acknowledges it", async () => {
+    const h = harness();
+    const { state, values } = h;
+    const socket = connectDevice(h);
     const queued = await state.fetch(
       new Request("https://internal/enqueue", {
         method: "POST",
@@ -52,10 +69,7 @@ describe("command lifecycle", () => {
     const command = (await queued.json()).command;
     const id = command.id;
     assert.equal(command.kind, "pulse");
-    assert.equal(
-      await (await state.fetch(new Request("https://internal/poll"))).text(),
-      `BOOT ${id}`,
-    );
+    assert.deepEqual(socket.messages, [`BOOT ${id} ${command.expiresAt}`]);
     assert.equal(
       (
         await state.fetch(
@@ -67,29 +81,11 @@ describe("command lifecycle", () => {
       ).status,
       409,
     );
-    assert.equal(
-      (
-        await state.fetch(
-          new Request("https://internal/ack", {
-            method: "POST",
-            body: "wrong-id",
-          }),
-        )
-      ).status,
-      404,
-    );
-    assert.equal(
-      (
-        await state.fetch(
-          new Request("https://internal/ack", { method: "POST", body: id }),
-        )
-      ).status,
-      200,
-    );
-    assert.equal(
-      await (await state.fetch(new Request("https://internal/poll"))).text(),
-      "NONE",
-    );
+    await state.webSocketMessage(socket, "ACK wrong-id");
+    assert.ok(values.get("pending"));
+    await state.webSocketMessage(socket, `ACK ${id}`);
+    assert.equal(values.has("pending"), false);
+    assert.deepEqual(socket.messages.at(-1), `ACKED ${id}`);
     assert.ok(values.get("lastBoot"));
     assert.equal(
       (
@@ -104,13 +100,13 @@ describe("command lifecycle", () => {
     );
   });
 
-  it("does not deliver expired commands", async () => {
-    const { state, values } = harness();
+  it("does not deliver expired commands on reconnect", async () => {
+    const h = harness();
+    const { state, values } = h;
     values.set("pending", { id: "old", expiresAt: Date.now() - 1 });
-    assert.equal(
-      await (await state.fetch(new Request("https://internal/poll"))).text(),
-      "NONE",
-    );
+    const socket = connectDevice(h);
+    await state.sendPending(socket);
+    assert.deepEqual(socket.messages, []);
   });
 
   it("rejects unsupported actions without reserving a command", async () => {
@@ -129,13 +125,36 @@ describe("command lifecycle", () => {
     assert.equal(values.has("pending"), false);
   });
 
-  it("delivers existing pending commands as short pulses", async () => {
-    const { state, values } = harness();
-    values.set("pending", { id: "legacy-id", expiresAt: Date.now() + 60000 });
-    assert.equal(
-      await (await state.fetch(new Request("https://internal/poll"))).text(),
-      "BOOT legacy-id",
-    );
+  it("replays pending commands when the device reconnects", async () => {
+    const h = harness();
+    const { state, values } = h;
+    const pending = { id: "legacy-id", expiresAt: Date.now() + 60000 };
+    values.set("pending", pending);
+    const socket = connectDevice(h);
+    await state.sendPending(socket);
+    assert.deepEqual(socket.messages, [`BOOT legacy-id ${pending.expiresAt}`]);
+  });
+
+  it("ignores acknowledgement from a disconnected socket", async () => {
+    const h = harness();
+    const old = connectDevice(h);
+    h.sockets.splice(0, 1);
+    const id = "12345678-1234-1234-1234-123456789abc";
+    h.values.set("pending", { id, expiresAt: Date.now() + 60000 });
+    await h.state.webSocketMessage(old, `ACK ${id}`);
+    assert.ok(h.values.get("pending"));
+  });
+
+  it("refreshes last seen only from the connected device", async () => {
+    const h = harness();
+    const socket = connectDevice(h);
+    h.values.set("lastSeen", 1);
+    await h.state.webSocketMessage(socket, "PING");
+    assert.ok(h.values.get("lastSeen") > 1);
+    h.sockets.splice(0, 1);
+    h.values.set("lastSeen", 1);
+    await h.state.webSocketMessage(socket, "PING");
+    assert.equal(h.values.get("lastSeen"), 1);
   });
 });
 
@@ -219,9 +238,9 @@ describe("access and device authentication", () => {
     );
   });
 
-  it("requires the device token and accepts a valid poll", async () => {
+  it("requires the device token and a WebSocket upgrade", async () => {
     const { deviceEnv } = harness();
-    const url = "https://remote-boot-device.example.workers.dev/poll";
+    const url = "https://remote-boot-device.example.workers.dev/connect";
     assert.equal(
       (await deviceWorker.fetch(new Request(url), deviceEnv)).status,
       401,
@@ -241,12 +260,16 @@ describe("access and device authentication", () => {
       }),
       deviceEnv,
     );
-    assert.equal(await response.text(), "NONE");
+    assert.equal(response.status, 426);
+    assert.equal((await deviceWorker.fetch(new Request("https://device.example/poll", {
+      headers: { "x-device-token": deviceEnv.DEVICE_TOKEN },
+    }), deviceEnv)).status, 404);
   });
 
   it("accepts a boot request only while the ESP32 is online", async () => {
-    const { siteEnv, values } = harness();
-    values.set("lastSeen", Date.now());
+    const h = harness();
+    const { siteEnv } = h;
+    connectDevice(h);
     const response = await siteWorker.fetch(
       new Request(`${page}/api/boot`, {
         method: "POST",
@@ -259,9 +282,23 @@ describe("access and device authentication", () => {
     assert.ok((await response.json()).command.id);
   });
 
+  it("rejects commands after the WebSocket disconnects even if last seen is recent", async () => {
+    const h = harness();
+    connectDevice(h);
+    h.sockets.length = 0;
+    const state = await siteWorker.fetch(new Request(`${page}/api/state`), h.siteEnv, identity);
+    assert.equal((await state.json()).online, false);
+    const response = await siteWorker.fetch(new Request(`${page}/api/boot`, {
+      method: "POST",
+      headers: { origin: page },
+    }), h.siteEnv, identity);
+    assert.equal(response.status, 503);
+  });
+
   it("queues a fixed hold command and delivers it to the ESP32", async () => {
-    const { siteEnv, deviceEnv, values } = harness();
-    values.set("lastSeen", Date.now());
+    const h = harness();
+    const { siteEnv } = h;
+    const socket = connectDevice(h);
     const response = await siteWorker.fetch(
       new Request(`${page}/api/hold`, {
         method: "POST",
@@ -273,13 +310,7 @@ describe("access and device authentication", () => {
     assert.equal(response.status, 202);
     const { command } = await response.json();
     assert.equal(command.kind, "hold");
-    const poll = await deviceWorker.fetch(
-      new Request("https://device.example/poll", {
-        headers: { "x-device-token": deviceEnv.DEVICE_TOKEN },
-      }),
-      deviceEnv,
-    );
-    assert.equal(await poll.text(), `HOLD ${command.id}`);
+    assert.deepEqual(socket.messages, [`HOLD ${command.id} ${command.expiresAt}`]);
     const state = await siteWorker.fetch(
       new Request(`${page}/api/state`),
       siteEnv,
