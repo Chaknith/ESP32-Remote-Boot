@@ -22,6 +22,7 @@
 #define POLL_INTERVAL_MS 10000
 #define RESPONSE_SIZE 96
 #define BOOT_TASK_STACK_BYTES 16384
+#define RELAY_HOLD_MS 5000
 
 static const char *TAG = "remote_boot";
 static EventGroupHandle_t wifi_events;
@@ -128,9 +129,9 @@ static bool save_processed_id(const char *id) {
     return error == ESP_OK;
 }
 
-static void pulse_relay(void) {
+static void activate_relay(bool hold) {
     gpio_set_level(RELAY_GPIO, RELAY_ACTIVE_LEVEL);
-    vTaskDelay(pdMS_TO_TICKS(RELAY_PULSE_MS));
+    vTaskDelay(pdMS_TO_TICKS(hold ? RELAY_HOLD_MS : RELAY_PULSE_MS));
     gpio_set_level(RELAY_GPIO, !RELAY_ACTIVE_LEVEL);
 }
 
@@ -169,13 +170,15 @@ static void boot_task(void *arg) {
                 ESP_LOGI(TAG, "Boot task minimum free stack: %u bytes", (unsigned)uxTaskGetStackHighWaterMark(NULL));
                 poll_reported = true;
             }
-            if (status == 200 && strncmp(response.text, "BOOT ", 5) == 0) {
+            bool hold = strncmp(response.text, "HOLD ", 5) == 0;
+            bool pulse = strncmp(response.text, "BOOT ", 5) == 0;
+            if (status == 200 && (pulse || hold)) {
                 char *id = response.text + 5;
                 if (strlen(id) == 36) {
                     if (!already_processed(id)) {
                         if (save_processed_id(id)) {
-                            pulse_relay();
-                            ESP_LOGI(TAG, "Power-button pulse sent");
+                            activate_relay(hold);
+                            ESP_LOGI(TAG, "%s", hold ? "Five-second power-button hold sent" : "Power-button pulse sent");
                         } else {
                             ESP_LOGE(TAG, "Could not save command ID; pulse refused");
                             vTaskDelay(pdMS_TO_TICKS(POLL_INTERVAL_MS));
