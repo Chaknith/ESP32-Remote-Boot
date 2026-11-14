@@ -1,6 +1,6 @@
 export const COMMAND_TTL_MS = 90_000;
 export const ONLINE_WINDOW_MS = 90_000;
-export const COMMAND_COOLDOWN_MS = 120_000;
+export const COMMAND_COOLDOWN_MS = 10_000;
 
 export function commandStub(env) {
   return env.COMMANDS.get(env.COMMANDS.idFromName("pc-power"));

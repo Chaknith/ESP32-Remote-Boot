@@ -12,7 +12,7 @@ ESP32 ↔ WSS + device token ↔ remote-boot-device Worker ┘
                                               └→ relay across PC power-button pins
 ```
 
-The two Workers share one strongly consistent Durable Object. The ESP32 starts the WebSocket connection from behind the home router. The device Worker pushes a command over that connection and receives an acknowledgement over the same connection. Commands expire after 90 seconds, and the service enforces two minutes between requests. If the connection drops before an acknowledgement, the pending command is sent again on reconnect until it expires. The ESP32 stores the last command ID in flash *before* actuating the relay, so a repeated command does not repeat the relay action. The dashboard reports whether the ESP32 is connected and whether a command was acknowledged; it cannot detect the PC's actual power state. A short pulse may turn on the PC or initiate shutdown depending on its current state and operating-system settings. A five-second hold can force an unresponsive PC off and may lose unsaved work. The website asks for confirmation before either command.
+The two Workers share one strongly consistent Durable Object. The ESP32 starts the WebSocket connection from behind the home router. The device Worker pushes a command over that connection and receives an acknowledgement over the same connection. Commands expire after 90 seconds, and the service enforces ten seconds between requests. If the connection drops before an acknowledgement, the pending command is sent again on reconnect until it expires. The ESP32 stores the last command ID in flash *before* actuating the relay, so a repeated command does not repeat the relay action. The dashboard reports whether the ESP32 is connected and whether a command was acknowledged; it cannot detect the PC's actual power state. A short pulse may turn on the PC or initiate shutdown depending on its current state and operating-system settings. A five-second hold can force an unresponsive PC off and may lose unsaved work. The website asks for confirmation before either command.
 
 ## Cloudflare setup
 
@@ -56,7 +56,7 @@ This is a protocol change: the old firmware's `/poll` and `/ack` endpoints are r
 
 - **Send power pulse** closes the relay for `RELAY_PULSE_MS` (500 ms in the example).
 - **Force shutdown (hold 5 seconds)** closes the same relay for a fixed 5,000 ms. Use it only when the PC is unresponsive; it can lose unsaved work. The relay module must be rated to remain energized for at least five seconds.
-- Both controls require confirmation in the browser and share the same two-minute cooldown. The server also requires the signed-in owner, the same origin, and a recently online ESP32. The PC's actual power state is not measured, so check it before using either control.
+- Both controls require confirmation in the browser and share the same ten-second cooldown, shown as a countdown on the dashboard. The server also requires the signed-in owner, the same origin, and a recently online ESP32. The PC's actual power state is not measured, so check it before using either control.
 
 ## Development and checks
 

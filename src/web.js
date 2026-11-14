@@ -39,6 +39,7 @@ const pill = document.getElementById("status-pill");
 const statusText = document.getElementById("status-text");
 const lastSeen = document.getElementById("last-seen");
 let busy = false;
+let latestState = null;
 function message(text, error = false) {
   feedback.textContent = text;
   feedback.classList.toggle("error", error);
@@ -47,31 +48,37 @@ function setDisabled(disabled) {
   boot.disabled = disabled;
   hold.disabled = disabled;
 }
+function renderState(state) {
+  const remaining = Math.max(0, Math.ceil(((state.readyAt || 0) - Date.now()) / 1000));
+  const cooling = remaining > 0;
+  pill.className = "pill " + (state.online ? "online" : "offline");
+  statusText.textContent = state.online ? "ESP32 online" : "ESP32 offline";
+  lastSeen.textContent = state.lastSeen
+    ? new Date(state.lastSeen).toLocaleString()
+    : "Never";
+  setDisabled(busy || !state.online || state.pending || cooling);
+  if (!busy) {
+    if (state.pending)
+      message(
+        (state.pendingKind === "hold"
+          ? "A force shutdown is queued for the ESP32."
+          : "A power pulse is queued for the ESP32.") +
+          (cooling ? " Next command available in " + remaining + "s." : ""),
+      );
+    else if (!state.online)
+      message("ESP32 is offline. Check its power and Wi-Fi.");
+    else if (cooling) message("Next command available in " + remaining + "s.");
+    else message("ESP32 is online and ready.");
+  }
+}
 async function refresh() {
   try {
     const response = await fetch("/api/state", { cache: "no-store" });
     if (!response.ok) throw new Error("Status unavailable");
-    const state = await response.json();
-    const cooling = state.readyAt && state.readyAt > Date.now();
-    pill.className = "pill " + (state.online ? "online" : "offline");
-    statusText.textContent = state.online ? "ESP32 online" : "ESP32 offline";
-    lastSeen.textContent = state.lastSeen
-      ? new Date(state.lastSeen).toLocaleString()
-      : "Never";
-    setDisabled(busy || !state.online || state.pending || cooling);
-    if (!busy) {
-      if (state.pending)
-        message(
-          state.pendingKind === "hold"
-            ? "A force shutdown is queued for the ESP32."
-            : "A power pulse is queued for the ESP32.",
-        );
-      else if (!state.online)
-        message("ESP32 is offline. Check its power and Wi-Fi.");
-      else if (cooling) message("Please wait two minutes between commands.");
-      else message("ESP32 is online and ready.");
-    }
+    latestState = await response.json();
+    renderState(latestState);
   } catch {
+    latestState = null;
     pill.className = "pill offline";
     statusText.textContent = "Status unavailable";
     setDisabled(true);
@@ -86,6 +93,7 @@ async function sendAction(kind) {
       : "Press the PC power button for 0.5 seconds? This may turn the PC on or initiate shutdown. Continue?";
   if (!window.confirm(confirmation)) return;
   busy = true;
+  latestState = null;
   setDisabled(true);
   message("Sending request...");
   try {
@@ -111,5 +119,6 @@ async function sendAction(kind) {
 boot.addEventListener("click", () => sendAction("pulse"));
 hold.addEventListener("click", () => sendAction("hold"));
 refresh();
-setInterval(refresh, 10000);
+setInterval(() => { if (latestState && !busy) renderState(latestState); }, 1000);
+setInterval(refresh, 3000);
 `;

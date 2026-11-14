@@ -4,6 +4,7 @@ import { webcrypto } from "node:crypto";
 import { runInNewContext } from "node:vm";
 import deviceWorker, { CommandState } from "../src/device.js";
 import siteWorker from "../src/site.js";
+import { COMMAND_COOLDOWN_MS } from "../src/shared.js";
 import { clientJs } from "../src/web.js";
 
 globalThis.crypto ||= webcrypto;
@@ -55,6 +56,20 @@ const identity = {
 const page = "https://remote-boot-site.example.workers.dev";
 
 describe("command lifecycle", () => {
+  it("allows another command after the ten-second cooldown", async () => {
+    const h = harness();
+    connectDevice(h);
+    assert.equal(COMMAND_COOLDOWN_MS, 10_000);
+    h.values.set("lastRequest", Date.now() - 5_000);
+    const request = () => h.state.fetch(new Request("https://internal/enqueue", {
+      method: "POST",
+      body: "pulse",
+    }));
+    assert.equal((await request()).status, 429);
+    h.values.set("lastRequest", Date.now() - 11_000);
+    assert.equal((await request()).status, 202);
+  });
+
   it("pushes one command to the connected device, then acknowledges it", async () => {
     const h = harness();
     const { state, values } = h;
@@ -321,6 +336,31 @@ describe("access and device authentication", () => {
 });
 
 describe("website confirmation", () => {
+  it("updates the cooldown number every second", async () => {
+    const elements = new Map(["boot", "hold", "feedback", "status-pill", "status-text", "last-seen"].map((id) => [
+      id, { disabled: false, classList: { toggle() {} }, addEventListener() {} },
+    ]));
+    const intervals = new Map();
+    let now = 1_000_000;
+    runInNewContext(clientJs, {
+      document: { getElementById: (id) => elements.get(id) },
+      Date: { now: () => now },
+      fetch: async () => ({ ok: true, json: async () => ({ online: true, pending: false, readyAt: 1_010_000 }) }),
+      setInterval: (callback, milliseconds) => intervals.set(milliseconds, callback),
+      setTimeout() {},
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(elements.get("feedback").textContent, "Next command available in 10s.");
+    assert.equal(elements.get("boot").disabled, true);
+    now += 1_000;
+    intervals.get(1000)();
+    assert.equal(elements.get("feedback").textContent, "Next command available in 9s.");
+    now += 9_000;
+    intervals.get(1000)();
+    assert.equal(elements.get("feedback").textContent, "ESP32 is online and ready.");
+    assert.equal(elements.get("boot").disabled, false);
+  });
+
   it("requires confirmation before either power-button request", async () => {
     const elements = new Map(
       [

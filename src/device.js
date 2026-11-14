@@ -69,7 +69,7 @@ export class CommandState {
       const lastRequest = (await storage.get("lastRequest")) || 0;
       if (now - lastRequest < COMMAND_COOLDOWN_MS)
         return json(
-          { error: "Please wait two minutes before sending another command" },
+          { error: "Please wait 10 seconds before sending another command" },
           429,
         );
       const command = {
