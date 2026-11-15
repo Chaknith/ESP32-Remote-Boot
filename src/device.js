@@ -75,7 +75,6 @@ export class CommandState {
       const command = {
         id: crypto.randomUUID(),
         kind,
-        createdAt: now,
         expiresAt: now + COMMAND_TTL_MS,
       };
       await storage.put("pending", command);
