@@ -6,10 +6,10 @@ Private, internet-accessible power-button control for one PC. Cloudflare Access 
 
 ## The Goal
 
-The goal is to access Jupyter Notebook running on my desktop from my laptop, even when I am on another network. This involves two steps:
+The goal is to access Jupyter Lab running on my desktop from my laptop, even when I am on another network. This involves two steps:
 
 1. Turn on the desktop remotely.
-2. Connect to the desktop and open Jupyter Notebook.
+2. Connect to the desktop and open Jupyter Lab.
 
 This guide covers the first step. If the desktop is already on, skip ahead to [Access the desktop](documentations/Access-the-desktop.md) for the second step.
 
