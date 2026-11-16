@@ -65,6 +65,7 @@ export default {
         pending: !!state.pending,
         pendingKind: state.pending?.kind || null,
         readyAt: state.readyAt,
+        cooldownRemainingMs: state.cooldownRemainingMs ?? Math.max(0, (state.readyAt || 0) - Date.now()),
         lastSeen: state.lastSeen,
         lastBoot: state.lastBoot,
       });

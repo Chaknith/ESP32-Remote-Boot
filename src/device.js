@@ -67,11 +67,17 @@ export class CommandState {
       if (pending && pending.expiresAt > now)
         return json({ error: "A boot request is already pending" }, 409);
       const lastRequest = (await storage.get("lastRequest")) || 0;
-      if (now - lastRequest < COMMAND_COOLDOWN_MS)
+      const retryAfterMs = COMMAND_COOLDOWN_MS - (now - lastRequest);
+      if (retryAfterMs > 0) {
+        const seconds = Math.ceil(retryAfterMs / 1000);
         return json(
-          { error: "Please wait 10 seconds before sending another command" },
+          {
+            error: `Please wait ${seconds} second${seconds === 1 ? "" : "s"} before sending another command`,
+            retryAfterMs,
+          },
           429,
         );
+      }
       const command = {
         id: crypto.randomUUID(),
         kind,
@@ -102,6 +108,9 @@ export class CommandState {
         lastSeen: lastSeen || null,
         lastBoot: lastBoot || null,
         readyAt: lastRequest ? lastRequest + COMMAND_COOLDOWN_MS : null,
+        cooldownRemainingMs: lastRequest
+          ? Math.max(0, lastRequest + COMMAND_COOLDOWN_MS - now)
+          : 0,
       });
     }
 

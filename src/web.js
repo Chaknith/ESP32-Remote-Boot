@@ -540,6 +540,7 @@ const confirmMessage = document.getElementById("confirm-message");
 const confirmAccept = document.getElementById("confirm-accept");
 let busy = false;
 let latestState = null;
+let refreshGeneration = 0;
 function message(text, error = false) {
   feedback.textContent = text;
   feedback.classList.toggle("error", error);
@@ -549,7 +550,7 @@ function setDisabled(disabled) {
   hold.disabled = disabled;
 }
 function renderState(state) {
-  const remaining = Math.max(0, Math.ceil(((state.readyAt || 0) - Date.now()) / 1000));
+  const remaining = Math.max(0, Math.ceil((state.cooldownDeadline - performance.now()) / 1000));
   const cooling = remaining > 0;
   pill.className = "pill " + (state.online ? "online" : "offline");
   statusText.textContent = state.online ? "ESP32 online" : "ESP32 offline";
@@ -572,12 +573,18 @@ function renderState(state) {
   }
 }
 async function refresh() {
+  if (busy) return;
+  const generation = ++refreshGeneration;
   try {
     const response = await fetch("/app/api/state", { cache: "no-store", headers: { "X-Requested-With": "XMLHttpRequest" } });
     if (!response.ok) throw new Error("Status unavailable");
-    latestState = await response.json();
+    const state = await response.json();
+    if (generation !== refreshGeneration || busy) return;
+    state.cooldownDeadline = performance.now() + Math.max(0, state.cooldownRemainingMs || 0);
+    latestState = state;
     renderState(latestState);
   } catch {
+    if (generation !== refreshGeneration || busy) return;
     latestState = null;
     pill.className = "pill offline";
     statusText.textContent = "Status unavailable";
@@ -606,6 +613,7 @@ function askConfirmation(kind) {
 async function sendAction(kind) {
   if (busy || boot.disabled || hold.disabled) return;
   if (!(await askConfirmation(kind))) return;
+  ++refreshGeneration;
   busy = true;
   latestState = null;
   setDisabled(true);

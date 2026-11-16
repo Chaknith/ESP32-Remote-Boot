@@ -66,7 +66,11 @@ describe("command lifecycle", () => {
       method: "POST",
       body: "pulse",
     }));
-    assert.equal((await request()).status, 429);
+    const rejected = await request();
+    assert.equal(rejected.status, 429);
+    const cooldown = await rejected.json();
+    assert.ok(cooldown.retryAfterMs > 4_000 && cooldown.retryAfterMs <= 5_000);
+    assert.match(cooldown.error, /wait 5 seconds/);
     h.values.set("lastRequest", Date.now() - 11_000);
     assert.equal((await request()).status, 202);
   });
@@ -339,6 +343,9 @@ describe("access and device authentication", () => {
     );
     assert.equal(response.status, 202);
     assert.ok((await response.json()).command.id);
+    const status = await siteWorker.fetch(new Request(`${page}/app/api/state`), siteEnv, identity);
+    const state = await status.json();
+    assert.ok(state.cooldownRemainingMs > 0 && state.cooldownRemainingMs <= COMMAND_COOLDOWN_MS);
   });
 
   it("rejects commands after the WebSocket disconnects even if last seen is recent", async () => {
@@ -404,11 +411,13 @@ describe("website confirmation", () => {
       id, { disabled: false, classList: { toggle() {} }, addEventListener() {} },
     ]));
     const intervals = new Map();
-    let now = 1_000_000;
+    let now = 1_007_000;
+    let elapsed = 0;
     runInNewContext(clientJs, {
       document: { getElementById: (id) => elements.get(id) },
       Date: { now: () => now },
-      fetch: async () => ({ ok: true, json: async () => ({ online: true, pending: false, readyAt: 1_010_000 }) }),
+      performance: { now: () => elapsed },
+      fetch: async () => ({ ok: true, json: async () => ({ online: true, pending: false, readyAt: 1_010_000, cooldownRemainingMs: 10_000 }) }),
       setInterval: (callback, milliseconds) => intervals.set(milliseconds, callback),
       setTimeout() {},
     });
@@ -416,12 +425,36 @@ describe("website confirmation", () => {
     assert.equal(elements.get("feedback").textContent, "Next command available in 10s.");
     assert.equal(elements.get("boot").disabled, true);
     now += 1_000;
+    elapsed += 1_000;
     intervals.get(1000)();
     assert.equal(elements.get("feedback").textContent, "Next command available in 9s.");
     now += 9_000;
+    elapsed += 9_000;
     intervals.get(1000)();
     assert.equal(elements.get("feedback").textContent, "ESP32 is online and ready.");
     assert.equal(elements.get("boot").disabled, false);
+  });
+
+  it("ignores a status response that started before a newer one", async () => {
+    const elements = new Map(["boot", "hold", "feedback", "status-pill", "status-text", "last-seen"].map((id) => [
+      id, { disabled: false, classList: { toggle() {} }, addEventListener() {} },
+    ]));
+    const intervals = new Map();
+    const pending = [];
+    runInNewContext(clientJs, {
+      document: { getElementById: (id) => elements.get(id) },
+      performance: { now: () => 0 },
+      fetch: () => new Promise((resolve) => pending.push(resolve)),
+      setInterval: (callback, milliseconds) => intervals.set(milliseconds, callback),
+      setTimeout() {},
+    });
+    intervals.get(3000)();
+    pending[1]({ ok: true, json: async () => ({ online: true, pending: false, cooldownRemainingMs: 10_000 }) });
+    await new Promise((resolve) => setImmediate(resolve));
+    pending[0]({ ok: true, json: async () => ({ online: true, pending: false, cooldownRemainingMs: 0 }) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(elements.get("feedback").textContent, "Next command available in 10s.");
+    assert.equal(elements.get("boot").disabled, true);
   });
 
   it("requires confirmation before either power-button request", async () => {
@@ -469,6 +502,7 @@ describe("website confirmation", () => {
     const requests = [];
     const context = {
       document: { getElementById: (id) => elements.get(id) },
+      performance: { now: () => 0 },
       fetch: async (path, options) => {
         requests.push({ path, options });
         return {
